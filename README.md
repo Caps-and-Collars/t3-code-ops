@@ -4,7 +4,7 @@ Operations for `nobody0/t3code`. Stable candidates are prepared every four hours
 
 ## Preparation
 
-The `Prepare stable T3 candidate` workflow merges the newest stable upstream release into a candidate branch descended from the fork's main branch. When preparation fails, read the failed job with `gh run view RUN_ID --log-failed`. Resolve a merge conflict on the candidate branch with every ownership guard intact, push it, then run the workflow with `force`. It tests the ownership guards, packages the browser/server once, then tests locked installs, native terminals and isolated startup on Linux x64, Windows x64 and both Mac architectures. GitHub-hosted validation does not replace target-specific NixOS/Mac checks.
+The `Prepare stable T3 candidate` workflow merges the newest stable upstream release into a candidate branch descended from the fork's main branch. When it fails, read the job log (`gh run view RUN_ID --log-failed`) and check that fork main equals the deployed release (rollout step 2). Resolve a conflict by pushing the finished merge, with the package versions and fork repository URL that `prepare.mjs` sets, as `candidate/<tag>-<main12>-<ops12>`. An existing branch is built as-is, any operations commit changes the expected name, and failed preparations retry on schedule. It tests the ownership guards, packages the browser/server once, then tests locked installs, native terminals and isolated startup on Linux x64, Windows x64 and both Mac architectures. GitHub-hosted validation does not replace target-specific NixOS/Mac checks.
 
 Candidate IDs contain both source and operations commits. Unchanged successful candidates are not rebuilt. Four-hour checks refresh `maintenance-status/latest.json`. Schedule delays and outages are represented by timestamps. Workflows never connect to production machines. `T3_FORK_DEPLOY_KEY` is a dedicated write deploy key for the fork only; the build jobs never receive it.
 
@@ -26,15 +26,15 @@ For a first Mac installation, verify architecture, launchd and the existing inst
 
 ## Provider gateway updates
 
-Each gateway runs a pinned [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) release under a native service and serves one account per provider. No workflow prepares or installs it. KO's gateway instances record paths, service names, accounts and verified hashes; never put keys or credentials in KO or this repository. Update one gateway at a time, the least-used account first.
+Gateways run a pinned [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) release under a native service, one account per provider. KO's gateway instances record paths, service names and accounts; nothing here installs them. Update one gateway at a time:
 
-1. Choose a stable release that is at least a few days old and get approval for it. Read the release notes since the deployed version, and confirm that `config-version` is unchanged. Keep cloaking, account pooling and cross-account failover off.
-2. Download the platform archive and `checksums.txt` from the release. Check the archive's SHA-256 against `checksums.txt`, extract it to a new incoming directory and record the executable's SHA-256.
-3. Back up `config.yaml`. Start the new executable with a copy whose port and `auth-dir` point to an unused loopback port and an empty directory, then stop it. Never let two gateways share an auth directory: concurrent token refreshes can invalidate the login.
-4. Every machine using the route loses it during the restart, and nothing fails over. Ask the user to pause work on that route.
-5. Stop the service through its native manager (`launchctl bootout` or `Stop-ScheduledTask`). Keep the old executable beside the new one as `.previous`, install the new one in `bin/`, then start the service.
-6. Verify the version line printed by `-help`, the loopback listener, HTTP 401 on the tailnet listener without a key, the model list with a client key, and a ready route in the helper's `check`. Send one short request through the route.
-7. To roll back, restore the previous executable and `config.yaml`, then start the service. After success, update the KO gateway instance with the version, date and hashes using `baseRev`, then delete the backups.
+- **Choose** a stable release a few days old, read the notes since the deployed version and get approval. A `config-version` change needs review first. Do not enable account pooling, cross-account failover or new cloaking options.
+- **Verify** the archive against the release's `checksums.txt`.
+- **Swap** while the user pauses work on that route, since nothing fails over: back up `config.yaml`, stop the native service, keep the old executable as `.previous`, install the new one and start it.
+- **Check** the `-help` version line, HTTP 401 on the tailnet listener without a key, a ready route in the helper's `check`, and one short request. Roll back with the previous executable and `config.yaml`.
+- **Record** the version, date and hashes on the KO instance using `baseRev`, then delete the backups.
+
+Never run a second gateway on the same auth directory: concurrent token refreshes can invalidate the login.
 
 ## Recovery
 
