@@ -40,7 +40,7 @@ Never run a second gateway on the same auth directory: concurrent token refreshe
 
 Activation journals record the previous service, backup and before/after migration state. Backups live under the deployment root with owner-only directory permissions. Treat them as credentials; never upload them to GitHub.
 
-If an activation with a real database fails, the manager attempts to stop the candidate and records `recovery-required`. It never automatically restarts an older binary against a migrated DB. Inspect the journal and service logs. Keep both failed data and the pre-upgrade snapshot. Only restore data after proving no newer work will be lost or obtaining explicit incident-specific approval. Restore a matched database/settings/secrets/identity snapshot and its corresponding previous service, then revalidate. Binary-only rollback is reserved for disposable installations without databases. An interrupted transaction blocks a second activation.
+If an activation with a real database fails, the manager attempts to stop the candidate and records `recovery-required`. On Windows a stopped task stays disabled, so its triggers cannot start it, until a service definition is registered again. It never automatically restarts an older binary against a migrated DB. Inspect the journal and service logs. Keep both failed data and the pre-upgrade snapshot. Only restore data after proving no newer work will be lost or obtaining explicit incident-specific approval. Restore a matched database/settings/secrets/identity snapshot and its corresponding previous service, then revalidate. Binary-only rollback is reserved for disposable installations without databases. An interrupted transaction blocks a second activation.
 
 ## Read-only reminder
 

@@ -135,6 +135,61 @@ NodeTest.test(
     NodeAssert.deepEqual(observed, { state: "Ready", stopRequested: true });
   },
 );
+// A Task Scheduler stand-in. The supervisor's exit has already ended the instance, so
+// Stop-ScheduledTask finds nothing to stop; unless the task is disabled, its own
+// trigger starts the old definition again (seen on 20 November 2026).
+function schedulerAdapter(t, c, stopFixture) {
+  const record = NodePath.join(c.root, "scheduler.json");
+  NodeFS.mkdirSync(c.root, { recursive: true });
+  t.after(() => NodeFS.rmSync(record, { force: true }));
+  const adapter = platformAdapter(c, {
+    executePowerShell: (script) =>
+      run("powershell.exe", [
+        "-NoProfile", "-NonInteractive", "-EncodedCommand",
+        Buffer.from(
+          `$ErrorActionPreference='Stop';
+          $script:enabled=$true; $script:state='Running'; $script:calls=@();
+          function Get-ScheduledTask {[pscustomobject]@{State=$script:state;Settings=[pscustomobject]@{Enabled=$script:enabled}}}
+          function Disable-ScheduledTask {$script:calls+='disable';$script:enabled=$false}
+          function Enable-ScheduledTask {$script:calls+='enable';$script:enabled=$true}
+          function Stop-ScheduledTask {$script:calls+='stop';${stopFixture}}
+          try{ ${script} } finally {
+            @{state=$script:state;enabled=$script:enabled;calls=$script:calls}|ConvertTo-Json -Compress|Set-Content -LiteralPath '${record.replaceAll("'", "''")}'
+          }`,
+          "utf16le",
+        ).toString("base64"),
+      ]),
+  });
+  return { adapter, observed: () => JSON.parse(NodeFS.readFileSync(record, "utf8")) };
+}
+NodeTest.test(
+  "Windows stop disables the task so its own trigger cannot restart it during the stop",
+  { skip: process.platform !== "win32", timeout: 30000 },
+  (t) => {
+    const { c } = setup(t);
+    const { adapter, observed } = schedulerAdapter(
+      t,
+      c,
+      "$script:state=$(if($script:enabled){'Running'}else{'Disabled'})",
+    );
+    NodeAssert.equal(adapter.stop(), true);
+    NodeAssert.deepEqual(observed(), { state: "Disabled", enabled: false, calls: ["disable", "stop"] });
+  },
+);
+NodeTest.test(
+  "Windows stop re-enables the task when Task Scheduler does not acknowledge the stop",
+  { skip: process.platform !== "win32", timeout: 30000 },
+  (t) => {
+    const { c } = setup(t);
+    const { adapter, observed } = schedulerAdapter(t, c, "");
+    NodeAssert.throws(() => adapter.stop(), /did not acknowledge the stopped task/);
+    NodeAssert.deepEqual(observed(), {
+      state: "Running",
+      enabled: true,
+      calls: ["disable", "stop", "enable"],
+    });
+  },
+);
 NodeTest.test("first installation rejects occupied port before changing any service", async (t) => {
   const { c, releaseId } = setup(t);
   let changed = false;

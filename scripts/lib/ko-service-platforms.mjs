@@ -319,11 +319,17 @@ export function platformAdapter(c, { executePowerShell = powershell } = {}) {
   const getTask = `$task=Get-ScheduledTask -TaskPath '\\' -TaskName ${task} -ErrorAction SilentlyContinue;`;
   // Validate both identity and creation time before trusting a reusable process ID.
   const getChild = `$child=$null; if(Test-Path -LiteralPath ${runtime}){ $r=Get-Content -Raw -LiteralPath ${runtime}|ConvertFrom-Json; $candidate=Get-Process -Id $r.pid -ErrorAction SilentlyContinue; if($candidate -and $candidate.Path -eq $r.executable -and $candidate.StartTime.ToUniversalTime().ToString('o') -eq $r.started){$child=$candidate} };`;
+  // Returns whether the task was enabled. A successful stop leaves it disabled, because
+  // the supervisor's exit ends the task instance before Stop-ScheduledTask runs and the
+  // task's own triggers can start the old definition again. Registering re-enables it.
   function stop() {
     // The owner is normally the task's child; after a wrapper replacement it is the
     // supervisor that child adopted. Its token proves it before the wait.
-    executePowerShell(
+    const output = executePowerShell(
       `${getTask}${getChild}
+      $wasEnabled=[bool]($task -and $task.Settings.Enabled);
+      if($wasEnabled){Disable-ScheduledTask -TaskPath '\\' -TaskName ${task}|Out-Null};
+      try{
       $ownedFile=${psQuote(NodePath.join(c.root, "service-runtime.json"))};
       if(Test-Path -LiteralPath $ownedFile){$owned=Get-Content -Raw -LiteralPath $ownedFile|ConvertFrom-Json;
         if($owned.controlOrigin -match '^http://127\\.0\\.0\\.1:[0-9]+$'){
@@ -340,8 +346,26 @@ export function platformAdapter(c, { executePowerShell = powershell } = {}) {
           if([DateTime]::UtcNow -ge $stopDeadline){throw 'Task Scheduler did not acknowledge the stopped task; replacement refused.'};
           Start-Sleep -Milliseconds 100;
         }while($true);
-      };`,
+      };
+      }catch{if($wasEnabled){Enable-ScheduledTask -TaskPath '\\' -TaskName ${task}|Out-Null};throw};
+      if($wasEnabled){'task-was-enabled'}`,
     );
+    return /task-was-enabled/.test(String(output));
+  }
+  // A failed write re-enables the old task so its triggers keep recovering the service.
+  function replaceTask(write) {
+    const wasEnabled = stop();
+    try {
+      write();
+    } catch (error) {
+      if (wasEnabled)
+        try {
+          powershell(`Enable-ScheduledTask -TaskPath '\\' -TaskName ${task}|Out-Null`);
+        } catch {
+          /* report the write failure */
+        }
+      throw error;
+    }
   }
   function register(definition) {
     powershell(
@@ -372,18 +396,19 @@ export function platformAdapter(c, { executePowerShell = powershell } = {}) {
         `(New-Object System.Security.Principal.NTAccount(${psQuote(c.userName)})).Translate([System.Security.Principal.SecurityIdentifier]).Value`,
       );
       if (!/^S-1-[0-9-]+$/.test(sid)) throw new Error("Cannot resolve Windows operator SID.");
-      stop();
-      writeFile(scriptPath, renderWindowsScript(c, target));
-      register(renderWindowsTask(c, scriptPath, sid));
+      replaceTask(() => {
+        writeFile(scriptPath, renderWindowsScript(c, target));
+        register(renderWindowsTask(c, scriptPath, sid));
+      });
     },
-    restore: (saved) => {
-      stop();
-      writeFile(scriptPath, saved.script ?? null);
-      if (saved.definition !== null) register(saved.definition);
-      else
-        powershell(
-          `${getTask} if($task){Unregister-ScheduledTask -TaskPath '\\' -TaskName ${task} -Confirm:$false}`,
-        );
-    },
+    restore: (saved) =>
+      replaceTask(() => {
+        writeFile(scriptPath, saved.script ?? null);
+        if (saved.definition !== null) register(saved.definition);
+        else
+          powershell(
+            `${getTask} if($task){Unregister-ScheduledTask -TaskPath '\\' -TaskName ${task} -Confirm:$false}`,
+          );
+      }),
   };
 }
