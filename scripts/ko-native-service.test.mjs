@@ -265,6 +265,71 @@ const arg=n=>process.argv[process.argv.indexOf(n)+1];http.createServer((_req,res
     NodeAssert.equal(NodeFS.readdirSync(c.root).some((name) => name.startsWith("smoke-")), false);
   },
 );
+// Fixture server whose helper keeps the trial directory busy until released. Without `orphan` the
+// helper is a detached Node child (outside Node's kill-on-close job) running in the directory; with
+// it, a PowerShell intermediate that exits at once starts a file-locking holder, so the server's
+// process tree no longer contains it.
+function lockingServer(orphan) {
+  return `import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';import {setTimeout as delay} from 'node:timers/promises';
+const quote=value=>"'"+value.replaceAll("'","''")+"'";const encode=s=>Buffer.from(s,'utf16le').toString('base64');
+const lock=path.join(process.cwd(),'held-file'),ready=path.join(path.dirname(process.cwd()),'locker-ready'),release=path.join(path.dirname(process.cwd()),'locker-release');
+if(${orphan}){
+const holder="$ErrorActionPreference='Stop';$stream=[IO.File]::Open("+quote(lock)+",[IO.FileMode]::Create,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);try{[IO.File]::WriteAllText("+quote(ready)+",'ready');$end=(Get-Date).AddSeconds(45);while(-not (Test-Path -LiteralPath "+quote(release)+") -and (Get-Date) -lt $end){Start-Sleep -Milliseconds 100}}finally{$stream.Dispose()}";
+spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encode("Start-Process -WindowStyle Hidden -FilePath powershell.exe -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','"+encode(holder)+"'")],{stdio:'ignore',windowsHide:true});
+}else{
+const holder="const fs=require('node:fs');fs.writeFileSync("+JSON.stringify(ready)+",'ready');const end=Date.now()+45000;setInterval(()=>{if(fs.existsSync("+JSON.stringify(release)+")||Date.now()>end)process.exit(0);},100);";
+spawn(process.execPath,['-e',holder],{cwd:process.cwd(),stdio:'ignore',windowsHide:true,detached:true});
+}
+const end=Date.now()+15000;while(!fs.existsSync(ready)){if(Date.now()>end)throw Error('File-lock fixture did not start');await delay(25);}
+const arg=n=>process.argv[process.argv.indexOf(n)+1];http.createServer((_req,res)=>res.end('test release')).listen(Number(arg('--port')),'127.0.0.1');`;
+}
+async function releaseLock(c) {
+  NodeFS.writeFileSync(NodePath.join(c.root, "locker-release"), "release");
+  const end = Date.now() + 20000;
+  for (const name of NodeFS.readdirSync(c.root).filter((n) => n.startsWith("smoke-")))
+    while (true) {
+      try {
+        NodeFS.rmSync(NodePath.join(c.root, name), { recursive: true });
+        break;
+      } catch (error) {
+        if (Date.now() > end) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+}
+NodeTest.test(
+  "isolated smoke ends the server's process tree before removing the trial directory",
+  { skip: process.platform !== "win32", timeout: 60000 },
+  async (t) => {
+    const { c, target } = setup(t);
+    NodeFS.writeFileSync(NodePath.join(target, "node_modules/t3/dist/bin.mjs"), lockingServer(false));
+    const warn = t.mock.method(console, "warn", () => {});
+    try {
+      await smoke(c, target);
+      NodeAssert.equal(warn.mock.callCount(), 0);
+      NodeAssert.equal(NodeFS.readdirSync(c.root).some((name) => name.startsWith("smoke-")), false);
+    } finally {
+      await releaseLock(c);
+    }
+  },
+);
+NodeTest.test(
+  "a passed isolated smoke leaves a directory locked outside its process tree with a warning",
+  { skip: process.platform !== "win32", timeout: 60000 },
+  async (t) => {
+    const { c, target } = setup(t);
+    NodeFS.writeFileSync(NodePath.join(target, "node_modules/t3/dist/bin.mjs"), lockingServer(true));
+    const warn = t.mock.method(console, "warn", () => {});
+    try {
+      await smoke(c, target);
+      NodeAssert.equal(warn.mock.callCount(), 1);
+      NodeAssert.match(warn.mock.calls[0].arguments[0], /^Isolated startup passed; could not remove .*smoke-.* \((EPERM|EBUSY|ENOTEMPTY)\)/);
+      NodeAssert.equal(NodeFS.readdirSync(c.root).some((name) => name.startsWith("smoke-")), true);
+    } finally {
+      await releaseLock(c);
+    }
+  },
+);
 NodeTest.test(
   "disposable native service starts a Node package and rolls back first installation",
   {

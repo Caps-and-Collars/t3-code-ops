@@ -135,6 +135,7 @@ export async function smoke(c, target) {
   const log = NodeFS.openSync(NodePath.join(directory, "startup.log"), "wx", 0o600);
   const socket = NodeNet.createServer();
   let child;
+  let passed = false;
   try {
     socket.listen(0, "127.0.0.1");
     await NodeEvents.once(socket, "listening");
@@ -177,7 +178,10 @@ export async function smoke(c, target) {
       } catch {
         stable = 0;
       }
-      if (stable >= 3) return;
+      if (stable >= 3) {
+        passed = true;
+        return;
+      }
       await NodeTimersPromises.setTimeout(1000);
     }
     throw new Error("Isolated server failed startup validation.");
@@ -185,7 +189,13 @@ export async function smoke(c, target) {
     if (socket.listening) socket.close();
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const exited = new Promise((resolve) => child.once("exit", resolve));
-      child.kill("SIGTERM");
+      // On Windows kill() ends only the server; detached children keep running in the trial directory.
+      if (process.platform === "win32")
+        NodeChildProcess.spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+      else child.kill("SIGTERM");
       const stopped = await Promise.race([
         exited.then(() => true),
         NodeTimersPromises.setTimeout(5000).then(() => false),
@@ -196,10 +206,20 @@ export async function smoke(c, target) {
       }
     }
     NodeFS.closeSync(log);
-    // Only the mkdtemp directory created by this invocation is removed.
-    // Windows can retain a directory handle briefly after the child exits.
-    // Retry transient EPERM/EBUSY failures before rejecting a healthy trial.
+    removeTrialDirectory(directory, passed);
+  }
+}
+// Only the mkdtemp directory created by this trial is removed. Windows can keep a handle open
+// after the server exits (an orphaned probe, antivirus), so a locked directory never fails a
+// passed trial or hides a failed trial's error; it stays behind with a warning.
+function removeTrialDirectory(directory, passed) {
+  try {
     NodeFS.rmSync(directory, { recursive: true, maxRetries: 8, retryDelay: 250 });
+  } catch (error) {
+    if (passed && !["EPERM", "EBUSY", "ENOTEMPTY"].includes(error.code)) throw error;
+    console.warn(
+      `Isolated startup ${passed ? "passed" : "failed"}; could not remove ${directory} (${error.code}). Remove it once nothing holds it.`,
+    );
   }
 }
 function restore(c, previous) {
