@@ -5,11 +5,11 @@ const [operation, configPath, releaseId, extra] = process.argv.slice(2);
 if (
   !configPath ||
   extra ||
-  !["status", "activate", "rollback"].includes(operation) ||
-  (operation === "activate") !== Boolean(releaseId)
+  !["status", "activate", "complete", "rollback"].includes(operation) ||
+  ["activate", "complete"].includes(operation) !== Boolean(releaseId)
 ) {
   throw new Error(
-    "Usage: node scripts/manage-ko-release.mjs status|rollback CONFIG.json | activate CONFIG.json RELEASE_ID",
+    "Usage: node scripts/manage-ko-release.mjs status|rollback CONFIG.json | activate|complete CONFIG.json RELEASE_ID",
   );
 }
 const config = loadConfig(configPath);

@@ -8,7 +8,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, run, verifyInstalled } from "./ko-release.mjs";
 import { nativeManage, nativeStatus, nativeRecovery } from "./ko-deployment-native.mjs";
 import {ensureSupervisor,renderSystemdOverride} from './ko-service-platforms.mjs';
-import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped} from './ko-safety.mjs';
+import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped,requireCompletable,MIGRATION_BOOT_MS} from './ko-safety.mjs';
 
 export function loadConfig(path) {
   const config = readJson(path);
@@ -257,6 +257,7 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
   const trial = dependencies.smoke ?? smoke;
   const healthy = dependencies.healthy ?? waitHealthy;
   const recover = dependencies.restore ?? restore;
+  const stopped = dependencies.stopped ?? assertStopped;
   NodeFS.mkdirSync(c.root, { recursive: true });
   const lock = NodePath.join(c.root, "activation.lock");
   const fd = NodeFS.openSync(lock, "wx", 0o600);
@@ -276,6 +277,41 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
       await recover(c, journal.previous);
       await healthy(c, journal.previous.indexHash);
       atomicJson(journalPath(c), { ...journal, phase: "rolled-back" });
+      return;
+    }
+    if (operation === "complete") {
+      // Finish an activation that switched release and then failed validation, for example
+      // because the candidate was stopped while it migrated. Never restores older binaries.
+      if (typeof releaseId !== "string" || !/^[0-9][0-9A-Za-z.+-]*$/.test(releaseId))
+        throw new Error("Invalid release ID.");
+      const target = NodePath.join(c.root, "releases", releaseId);
+      if (verifyInstalled(target).releaseId !== releaseId)
+        throw new Error("Release directory does not match manifest.");
+      if (control(c, "is-active") === "active")
+        throw new Error("Service is running; a recovery-required candidate must be stopped first.");
+      await stopped(c);
+      const { added, remaining } = requireCompletable(c, transaction, releaseId, linkTarget(c), target);
+      const { failure, stopFailure, ...rest } = transaction;
+      const journal = {
+        ...rest,
+        phase: "pending",
+        completion: { at: new Date().toISOString(), failure, stopFailure, added, remaining },
+      };
+      atomicJson(journalPath(c), journal);
+      try {
+        control(c, "restart");
+        await healthy(
+          c,
+          digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")),
+          MIGRATION_BOOT_MS,
+        );
+        atomicJson(journalPath(c), { ...journal, phase: "active", after: databaseState(c.baseDir) });
+      } catch (error) {
+        let stopFailure;
+        try {control(c,'stop');} catch(e) {stopFailure=e.message;}
+        atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure});
+        throw new Error('Completing the activation failed; the candidate is stopped. Review the backup and database before agent recovery.',{cause:error});
+      }
       return;
     }
     if (operation !== "activate") throw new Error("Unknown operation.");
@@ -321,7 +357,11 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
       );
       run("systemctl", ["--user", "daemon-reload"]);
       control(c, "restart");
-      await healthy(c, digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")));
+      await healthy(
+        c,
+        digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")),
+        journal.safety ? MIGRATION_BOOT_MS : undefined,
+      );
       atomicJson(journalPath(c), { ...journal, phase: "active", after:databaseState(c.baseDir) });
     } catch (error) {
       if (liveDatabase(c.baseDir)) {

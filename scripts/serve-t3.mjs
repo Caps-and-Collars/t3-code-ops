@@ -264,10 +264,7 @@ try {
       started = Date.now();
     save();
     log(`generation=${generation} child=${owned.pid} started`);
-    const monitorAbort = new AbortController();
     const exit = once(owned, "exit").then(([code, signal]) => ({ reason: "exit", code, signal }));
-    const stopped = () => monitorAbort.abort();
-    stop.signal.addEventListener("abort", stopped, { once: true });
     const policy = {
       startupGraceMs: 90_000,
       intervalMs: 10_000,
@@ -275,27 +272,38 @@ try {
       failureSpanMs: 60_000,
       ...c.supervision,
     };
-    const outcome = await Promise.race([
-      exit,
-      monitorLiveness({
-        signal: monitorAbort.signal,
-        probe,
-        ...policy,
-        onProbe: (result) => {
-          lastProbe = result.kind;
-          phase = result.kind === "healthy" ? "ready" : "degraded";
-          save();
-        },
-      }).then((reason) => ({ reason })),
-    ]);
-    monitorAbort.abort();
-    stop.signal.removeEventListener("abort", stopped);
-    if (outcome.reason !== "exit" && !stop.signal.aborted) {
+    let outcome;
+    for (;;) {
+      const monitorAbort = new AbortController();
+      const stopped = () => monitorAbort.abort();
+      stop.signal.addEventListener("abort", stopped, { once: true });
+      outcome = await Promise.race([
+        exit,
+        monitorLiveness({
+          signal: monitorAbort.signal,
+          probe,
+          ...policy,
+          onProbe: (result) => {
+            lastProbe = result.kind;
+            phase = result.kind === "healthy" ? "ready" : "degraded";
+            save();
+          },
+        }).then((reason) => ({ reason })),
+      ]);
+      monitorAbort.abort();
+      stop.signal.removeEventListener("abort", stopped);
+      if (outcome.reason === "exit" || stop.signal.aborted) break;
+      let paused = false;
       while (inhibited() && !stop.signal.aborted) {
+        paused = true;
         phase = "blocked";
         save();
         await sleepUnlessAborted(1000, stop.signal);
       }
+      // A child that became healthy while recovery was paused, such as a release that was
+      // still migrating a large database during activation, is kept instead of restarted.
+      if (!paused || stop.signal.aborted || (await probe()).kind !== "healthy") break;
+      log(`generation=${generation} child=${owned.pid} healthy after paused recovery; monitoring resumed`);
     }
     await terminate(owned);
     await exit;

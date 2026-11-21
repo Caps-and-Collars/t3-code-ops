@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, verifyInstalled } from "./ko-release.mjs";
 import { platformAdapter, optionalFile } from "./ko-service-platforms.mjs";
-import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped} from './ko-safety.mjs';
+import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped,requireCompletable,MIGRATION_BOOT_MS} from './ko-safety.mjs';
 
 const journalPath = (c) => NodePath.join(c.root, "activation.json");
 const selectionPath = (c) => NodePath.join(c.root, "current.json");
@@ -62,14 +62,14 @@ async function assertPortFree(port) {
     );
   });
 }
-async function healthy(c, expectedHash, adapter) {
+async function healthy(c, expectedHash, adapter, timeoutMs = 60_000) {
   if (expectedHash === null) {
     if (adapter.info().state === "active")
       throw new Error("New service remains active after failed first installation.");
     await assertPortFree(c.port);
     return;
   }
-  const deadline = Date.now() + 60_000;
+  const deadline = Date.now() + timeoutMs;
   let lastPid = "",
     stable = 0,
     lastError;
@@ -95,7 +95,9 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
   const adapter = dependencies.adapter ?? platformAdapter(c);
   const verify = dependencies.verify ?? verifyInstalled;
   const trial = dependencies.smoke;
-  const health = dependencies.healthy ?? ((config, hash) => healthy(config, hash, adapter));
+  const health =
+    dependencies.healthy ?? ((config, hash, timeoutMs) => healthy(config, hash, adapter, timeoutMs));
+  const stopped = dependencies.stopped ?? assertStopped;
   const getHash = dependencies.indexHash ?? indexHash;
   const portFree = dependencies.portFree ?? assertPortFree;
   const recover = async (previous) => {
@@ -120,6 +122,41 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
       atomicJson(journalPath(c), { ...transaction, phase: "pending" });
       await recover(transaction.previous);
       atomicJson(journalPath(c), { ...transaction, phase: "rolled-back" });
+      return;
+    }
+    if (operation === "complete") {
+      // Finish an activation that switched release and then failed validation, for example
+      // because the candidate was stopped while it migrated. Never restores older binaries.
+      if (typeof releaseId !== "string" || !/^[0-9][0-9A-Za-z.+-]*$/.test(releaseId))
+        throw new Error("Invalid release ID.");
+      const target = NodePath.join(c.root, "releases", releaseId);
+      if (verify(target).releaseId !== releaseId)
+        throw new Error("Release directory does not match manifest.");
+      if (adapter.info().state === "active")
+        throw new Error("Service is running; a recovery-required candidate must be stopped first.");
+      await stopped(c);
+      const { added, remaining } = requireCompletable(c, transaction, releaseId, selected(c), target);
+      const { failure, stopFailure, ...rest } = transaction;
+      const journal = {
+        ...rest,
+        phase: "pending",
+        completion: { at: new Date().toISOString(), failure, stopFailure, added, remaining },
+      };
+      atomicJson(journalPath(c), journal);
+      try {
+        adapter.install(target);
+        await health(
+          c,
+          digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")),
+          MIGRATION_BOOT_MS,
+        );
+        atomicJson(journalPath(c), { ...journal, phase: "active", after: databaseState(c.baseDir) });
+      } catch (error) {
+        let stopFailure;
+        try {adapter.stop();} catch(e) {stopFailure=e.message;}
+        atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure});
+        throw new Error('Completing the activation failed; the candidate is stopped. Review the backup and database before agent recovery.',{cause:error});
+      }
       return;
     }
     if (operation !== "activate") throw new Error("Unknown operation.");
@@ -165,7 +202,11 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
       NodeFS.mkdirSync(c.baseDir, { recursive: true });
       adapter.install(target);
       select(c, target);
-      await health(c, digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")));
+      await health(
+        c,
+        digest(NodePath.join(target, "node_modules/t3/dist/client/index.html")),
+        journal.safety ? MIGRATION_BOOT_MS : undefined,
+      );
       atomicJson(journalPath(c), { ...journal, phase: "active", after:databaseState(c.baseDir) });
     } catch (error) {
       if (liveDatabase(c.baseDir)) {

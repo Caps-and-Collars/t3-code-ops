@@ -82,9 +82,38 @@ export async function rehearseMigrations(c,target,safety) {
   const report=parseMigrationReport(run(c.node,[script,c.migrationSource,safety.backup],{timeout:30*60_000}));
   atomicJson(path.join(safety.backup,'migration-report.json'),report);
 }
+// A release's first start applies its migrations to the live database before it serves
+// (T3 answers 503 meanwhile). On a large home that takes minutes, so the post-switch
+// health check uses the rehearsal's finite ceiling instead of the ordinary minute.
+export const MIGRATION_BOOT_MS=30*60_000;
+const migrationIds=state=>{
+  const table=state?.migrations?.find(t=>t.name==='effect_sql_migrations') ?? state?.migrations?.[0];
+  return (table?.rows ?? []).map(row=>Number(Object.values(row)[0]));
+};
+// Completing an interrupted activation forward is safe only when the live database is the
+// backed-up one plus a prefix of the migrations the rehearsal applied and verified.
+export function requireCompletable(c,journal,releaseId,selectedTarget,target) {
+  if(journal?.phase!=='recovery-required') throw Error('Only a recovery-required activation can be completed.');
+  if(journal.releaseId!==releaseId) throw Error('Release differs from the interrupted activation.');
+  if(!selectedTarget || path.resolve(selectedTarget)!==path.resolve(target)) throw Error('The interrupted release is not the selected one.');
+  const backup=journal.safety?.backup, before=journal.safety?.before;
+  if(!backup || !before || !fs.existsSync(backup)) throw Error('The interrupted activation has no stopped-home backup.');
+  const reportFile=path.join(backup,'migration-report.json');
+  if(!fs.existsSync(reportFile)) throw Error('The interrupted activation has no passed migration rehearsal.');
+  const report=validMigrationReport(JSON.parse(fs.readFileSync(reportFile,'utf8')));
+  const live=databaseState(c.baseDir);
+  if(!live || live.database!==before.database) throw Error('The live database is not the backed-up one.');
+  const was=migrationIds(before), now=migrationIds(live), rehearsed=report.applied.map(([id])=>Number(id));
+  const added=now.slice(was.length);
+  if(now.length<was.length || was.some((id,i)=>now[i]!==id) || added.some((id,i)=>rehearsed[i]!==id))
+    throw Error('Live migrations diverge from the backup and rehearsal; restore the backup instead.');
+  return {live,added:added.length,remaining:rehearsed.length-added.length};
+}
 export function parseMigrationReport(stdout) {
   // Upstream migration logging may precede our final one-line JSON result.
-  const report=JSON.parse(stdout.trim().split(/\r?\n/).at(-1));
+  return validMigrationReport(JSON.parse(stdout.trim().split(/\r?\n/).at(-1)));
+}
+function validMigrationReport(report) {
   if(!Array.isArray(report.applied) || !Array.isArray(report.events) || !Array.isArray(report.integrity) || report.integrity.length!==1 || report.integrity[0].integrity_check!=='ok') throw Error('Migration worker did not report a valid integrity result');
   return report;
 }
