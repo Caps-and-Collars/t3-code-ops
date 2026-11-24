@@ -7,7 +7,7 @@
 <textarea id="t3-maintenance-request" rows="6" readonly aria-label="Request to copy into an agent conversation"></textarea>
 <h2>Observer log</h2>
 <div id="t3-maintenance-log"></div>
-<p>Checks do not install updates. An offline machine stays pending until an agent updates it. A candidate whose source commit is already verified on a machine only changes operations tooling, which is installed separately, so it is not pending there. Session credentials retain upstream’s 30-day lifetime. A saved connection does not extend credential validity.</p>
+<p>Checks do not install updates. An offline machine stays pending until an agent updates it. A candidate whose source commit is already verified on a machine only changes operations tooling, which is installed separately, so it is not pending there. Session credentials follow upstream: a browser or app paired since 0.1.11 renews its 30-day session while it is used, while an older pairing expires 30 days after it was issued and needs one new pairing.</p>
 <p>This page reads a local observation, refreshed at login and every five minutes. The observer sends a desktop notification once when something needs attention: a candidate to review, failed or stale preparation, an always-on machine unreachable for an hour, or the observer itself failing. The observer log lists the newest problems it saw, including failed observer runs; a repeated problem is counted on one entry until it clears. If KO is unavailable, start its documented <code>bun dev</code> wrapper. Missing or stale observations mean unknown status.</p>
 <script>
 (() => {
@@ -36,7 +36,7 @@
     const machines=Array.isArray(data.machines)?data.machines:[];
     const failing=(Array.isArray(data.log)?data.log:[]).find(e=>e.source==='observer' && !e.resolvedAt);
     const p=data.preparation, stale=!Number.isFinite(age(data.checkedAt)) || age(data.checkedAt)>600000;
-    const prepStale=!p || !Number.isFinite(age(p.checkedAt)) || age(p.checkedAt)>28800000;
+    const prepStale=!p || !Number.isFinite(age(p.checkedAt)) || age(p.checkedAt)>57600000;
     candidate=p?.releaseId ?? null;
     let dismissed=false;try {dismissed=!!candidate && localStorage.getItem(key)===candidate;}catch{}
     // A machine needs the candidate only when its verified source differs; operations-only candidates reuse the deployed source.

@@ -78,7 +78,8 @@ test('an outage alerts after its threshold, once per outage, unless disabled',()
   assert.notEqual(attention({machines,log},T0+180*60000)[0].key,alerts[0].key);
 });
 test('stale or failed preparation is announced',()=>{
-  assert.match(attention({preparation:ready({checkedAt:at(-9*60)}),machines:[]},T0)[0].message,/eight hours/);
+  assert.deepEqual(attention({preparation:ready({checkedAt:at(-13*60)}),machines:[]},T0),[]);
+  assert.match(attention({preparation:ready({checkedAt:at(-17*60)}),machines:[]},T0)[0].message,/sixteen hours/);
   assert.match(attention({preparation:{status:'failed',checkedAt:at(0),upstreamTag:'v0.0.46'},machines:[]},T0)[0].message,/failed for v0.0.46/);
 });
 test('a failed delivery is logged and retried on the next run',()=>{
@@ -91,7 +92,7 @@ test('a failed delivery is logged and retried on the next run',()=>{
 test('a condition that disappears and returns is not announced again',()=>{
   const sent=[],notifier=n=>sent.push(n),machines=[{id:'mac',reachable:true,verifiedRelease:'r1',verifiedCommit:'old'}];
   const first=announce({preparation:ready(),machines,log:[]},{},{notifier,now:T0});
-  const hidden=announce({preparation:ready({checkedAt:at(-9*60)}),machines,log:[]},first,{notifier,now:T0});
+  const hidden=announce({preparation:ready({checkedAt:at(-17*60)}),machines,log:[]},first,{notifier,now:T0});
   const back=announce({preparation:ready(),machines,log:[]},hidden,{notifier,now:T0});
   assert.deepEqual(sent.map(n=>n.message.slice(0,12)),['T3 candidate','T3 preparati']);assert.equal(back.alerts[0].notifiedAt,first.alerts[0].notifiedAt);
 });
