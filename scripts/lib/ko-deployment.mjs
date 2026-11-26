@@ -367,6 +367,7 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
       );
       atomicJson(journalPath(c), { ...journal, phase: "active", after:databaseState(c.baseDir) });
     } catch (error) {
+      let settleFailure;
       if (!switched) {
         let settled;
         try {
@@ -380,8 +381,9 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
               await healthy(c, previous.indexHash);
             },
           });
-        } catch {
-          // The previous service could not be kept or restored; handled below.
+        } catch (e) {
+          // The previous service could not be kept or restored; recorded and handled below.
+          settleFailure = e.message;
         }
         if (settled) {
           atomicJson(journalPath(c), { ...journal, phase: "rolled-back", failure: error.message, settled });
@@ -393,7 +395,7 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
       if (liveDatabase(c.baseDir)) {
         let stopFailure;
         try {control(c,'stop');} catch(e) {stopFailure=e.message;}
-        atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure});
+        atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure,settleFailure});
         throw new Error('Activation failed; automatic binary rollback disabled. Review the backup and database before agent recovery.',{cause:error});
       }
       try {
