@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, verifyInstalled } from "./ko-release.mjs";
 import { platformAdapter, optionalFile } from "./ko-service-platforms.mjs";
-import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped,requireCompletable,MIGRATION_BOOT_MS} from './ko-safety.mjs';
+import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped,requireCompletable,settleBeforeSwitch,MIGRATION_BOOT_MS} from './ko-safety.mjs';
 
 const journalPath = (c) => NodePath.join(c.root, "activation.json");
 const selectionPath = (c) => NodePath.join(c.root, "current.json");
@@ -105,6 +105,8 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
     select(c, previous.target);
     await health(c, previous.indexHash);
   };
+  // Set just before the candidate is installed: until then it has never run on the live home.
+  let switched = false;
   NodeFS.mkdirSync(c.root, { recursive: true });
   const lock = NodePath.join(c.root, "activation.lock");
   const fd = NodeFS.openSync(lock, "wx", 0o600);
@@ -200,6 +202,7 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
         await rehearseMigrations(c,target,journal.safety);
       }
       NodeFS.mkdirSync(c.baseDir, { recursive: true });
+      switched = true;
       adapter.install(target);
       select(c, target);
       await health(
@@ -209,6 +212,26 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
       );
       atomicJson(journalPath(c), { ...journal, phase: "active", after:databaseState(c.baseDir) });
     } catch (error) {
+      if (!switched) {
+        let settled;
+        try {
+          settled = await settleBeforeSwitch({
+            active: () => adapter.info().state === "active",
+            unchanged: () => JSON.stringify(adapter.capture()) === JSON.stringify(previous.service),
+            servedHash: () => getHash(c.port),
+            expectedHash: previous.indexHash,
+            restore: () => recover(previous),
+          });
+        } catch {
+          // The previous service could not be kept or restored; handled below.
+        }
+        if (settled) {
+          atomicJson(journalPath(c), { ...journal, phase: "rolled-back", failure: error.message, settled });
+          throw new Error(`Activation failed before the release switch; previous service ${settled}: ${error.message}`, {
+            cause: error,
+          });
+        }
+      }
       if (liveDatabase(c.baseDir)) {
         let stopFailure;
         try {adapter.stop();} catch(e) {stopFailure=e.message;}
