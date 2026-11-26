@@ -176,9 +176,9 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
     if (typeof trial !== "function") throw new Error("Isolated startup validation is required.");
     verifyMigrationSource(c,target);
     await trial(c, target);
-    await assertIdle(c);
     const service = adapter.capture();
     const exists = service.definition !== null;
+    await assertIdle(c, { firstInstall: !exists });
     if (exists && adapter.info().state !== "active")
       throw new Error("Existing service is not active; diagnose it before activation.");
     if (!exists) await portFree(c.port);
@@ -191,7 +191,7 @@ export async function nativeManage(c, operation, releaseId, dependencies = {}) {
     atomicJson(journalPath(c), journal);
     try {
       if (databaseState(c.baseDir)) {
-        await assertIdle(c);
+        await assertIdle(c, { firstInstall: !exists });
         adapter.stop();
         if(adapter.info().state==='active') throw new Error('Service did not stop; backup refused.');
         await assertStopped(c);

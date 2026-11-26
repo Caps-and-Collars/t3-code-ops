@@ -22,8 +22,37 @@ export function databaseState(baseDir) {
     return {database:path.basename(file),migrations,integrity:'ok'};
   } finally {db.close();}
 }
-export async function assertIdle(c) {
+const pidAlive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
+// Anything but a refused connection counts as served, so an unclear probe never skips the idle check.
+function portListening(port) {
+  return new Promise(resolve=>{
+    const socket=net.connect({host:'127.0.0.1',port});
+    socket.setTimeout(2000);
+    socket.once('connect',()=>{socket.destroy();resolve(true);});
+    socket.once('timeout',()=>{socket.destroy();resolve(true);});
+    socket.once('error',e=>{socket.destroy();resolve(e.code!=='ECONNREFUSED');});
+  });
+}
+function recordedRuntimePid(baseDir) {
+  const file=path.join(baseDir,'userdata','server-runtime.json');
+  if(!fs.existsSync(file)) return null;
+  let runtime;
+  try {runtime=JSON.parse(fs.readFileSync(file,'utf8'));} catch {throw Error('Unreadable userdata/server-runtime.json; inspect the home before activation.');}
+  return Number.isInteger(runtime.pid) && runtime.pid>0 ? runtime.pid : null;
+}
+// A first installation (no native service yet) replaces a T3 that the tooling does not own,
+// typically the desktop app, and needs its port free. Once that T3 is closed its idle API is
+// gone, but a home that no process serves has no active turns or terminals: the stopped home
+// is then the proof. While anything still serves or runs it, the live idle check applies.
+export async function assertIdle(c, {firstInstall=false, alive=pidAlive, listening=portListening}={}) {
   if (!liveDatabase(c.baseDir)) return;
+  if (firstInstall) {
+    const pid=recordedRuntimePid(c.baseDir);
+    const running=pid!==null && alive(pid);
+    const served=await listening(c.port);
+    if (!running && !served) return;
+    if (!served) throw Error(`The home's recorded T3 process (PID ${pid}) is still running but does not serve port ${c.port}; close it before first installation.`);
+  }
   const environmentId=fs.readFileSync(path.join(c.baseDir,'userdata/environment-id'),'utf8').trim();
   const argv=installedCli(c);
   const helper=path.resolve(import.meta.dirname,'../ko-session.mjs');

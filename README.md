@@ -24,6 +24,8 @@ GitHub can disable public-repository schedules after 60 days without repository 
 
 For a first Mac installation, verify architecture, launchd and the existing installation while the device is awake and the operator is logged in. Configure `initialCli` with the verified existing CLI argv and retain its original launchd definition. No startup checker installs software.
 
+For a first Windows installation over the T3 desktop app, the app owns the port and no task exists yet. Run `check` and `idle` while it still runs, let its turns and terminals finish, then quit the app completely (including its tray icon) and run `activate` from a plain terminal. Without a native service, activation accepts the home as idle only when nothing serves its port and the PID recorded in `userdata/server-runtime.json` no longer runs; while either is still true it uses the live idle check, and a free port is still required.
+
 ## Provider gateway updates
 
 Gateways run a pinned [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) release under a native service, one account per provider. KO's gateway instances record paths, service names and accounts; nothing here installs them. Update one gateway at a time:

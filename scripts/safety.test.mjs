@@ -4,8 +4,68 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
-import {databaseState,snapshotStoppedHome,requireSafeBinaryRollback,installedCli,parseMigrationReport,requireCompletable} from './lib/ko-safety.mjs';
+import net from 'node:net';
+import {execFileSync} from 'node:child_process';
+import {databaseState,snapshotStoppedHome,requireSafeBinaryRollback,installedCli,parseMigrationReport,requireCompletable,assertIdle} from './lib/ko-safety.mjs';
 import {nativeManage} from './lib/ko-deployment-native.mjs';
+// A live home that the tooling has never selected a runtime for: reaching the live idle check
+// fails with "No selected runtime", which proves the check ran.
+function desktopHome(t,runtime) {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'t3-first-install-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const c={root,baseDir:path.join(root,'home'),platform:'win32',node:process.execPath,port:3773};
+  fs.mkdirSync(path.join(c.baseDir,'userdata'),{recursive:true});
+  const db=new DatabaseSync(path.join(c.baseDir,'userdata/statev2.sqlite'));
+  db.exec('CREATE TABLE effect_sql_migrations (migration_id INTEGER PRIMARY KEY, name TEXT)');db.close();
+  fs.writeFileSync(path.join(c.baseDir,'userdata/environment-id'),'env-1\n');
+  if(runtime!==undefined) fs.writeFileSync(path.join(c.baseDir,'userdata/server-runtime.json'),typeof runtime==='string'?runtime:JSON.stringify(runtime));
+  return c;
+}
+const freePort=()=>new Promise((resolve,reject)=>{const s=net.createServer();s.once('error',reject);s.listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>resolve(port));});});
+test('a first installation accepts a closed desktop home as idle without its live API',async t=>{
+  const c=desktopHome(t,{pid:4242,origin:'http://127.0.0.1:3773'});
+  await assertIdle(c,{firstInstall:true,alive:()=>false,listening:async()=>false});
+  const never=desktopHome(t);
+  await assertIdle(never,{firstInstall:true,alive:()=>{throw Error('no recorded PID to probe');},listening:async()=>false});
+  const closed={...desktopHome(t,{pid:4242}),port:await freePort()};
+  await assertIdle(closed,{firstInstall:true,alive:()=>false});
+});
+test('a first installation keeps the live idle check while the old T3 serves or runs',async t=>{
+  const c=desktopHome(t,{pid:4242,origin:'http://127.0.0.1:3773'});
+  await assert.rejects(assertIdle(c,{firstInstall:true,alive:()=>false,listening:async()=>true}),/No selected runtime/);
+  await assert.rejects(assertIdle(c,{firstInstall:true,alive:()=>true,listening:async()=>false}),/\(PID 4242\) is still running but does not serve port 3773/);
+  await assert.rejects(assertIdle(c,{firstInstall:true,alive:()=>true,listening:async()=>true}),/No selected runtime/);
+  const server=net.createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  t.after(()=>server.close());
+  await assert.rejects(assertIdle({...c,port:server.address().port},{firstInstall:true,alive:()=>false}),/No selected runtime/);
+  const unreadable=desktopHome(t,'{not json');
+  await assert.rejects(assertIdle(unreadable,{firstInstall:true,alive:()=>false,listening:async()=>false}),/Unreadable userdata\/server-runtime.json/);
+});
+test('activate over a still serving desktop T3 refuses before changing any service',async t=>{
+  const c=desktopHome(t,{pid:process.pid,origin:'http://127.0.0.1:3773'});
+  const server=net.createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  t.after(()=>server.close());
+  Object.assign(c,{port:server.address().port,baselineVersion:'0.0.42',service:'test',userName:'M\\U',unitDirectory:path.join(c.root,'units')});
+  c.migrationSource=path.join(c.root,'source');
+  for (const p of ['apps/server/node_modules/effect/dist/Effect.js','apps/server/src/persistence/Migrations.ts','packages/shared/src/nodeSqliteClient.ts']) {
+    fs.mkdirSync(path.dirname(path.join(c.migrationSource,p)),{recursive:true});fs.writeFileSync(path.join(c.migrationSource,p),'');
+  }
+  const git=(...args)=>execFileSync('git',['-c','user.name=t','-c','user.email=t@t','-C',c.migrationSource,...args],{encoding:'utf8'}).trim();
+  git('init','-q');git('add','-A');git('commit','-qm','source');
+  const releaseId='0.0.42-ko-aaaaaaaaaaaa', target=path.join(c.root,'releases',releaseId);
+  fs.mkdirSync(target,{recursive:true});fs.writeFileSync(path.join(target,'release.json'),JSON.stringify({commit:git('rev-parse','HEAD')}));
+  const calls=[];
+  await assert.rejects(nativeManage(c,'activate',releaseId,{
+    adapter:{capture:()=>(calls.push('capture'),{definition:null}),install:()=>calls.push('install'),stop:()=>calls.push('stop')},
+    verify:()=>({releaseId,version:c.baselineVersion}),smoke:async()=>{},portFree:async()=>calls.push('portFree'),
+  }),/No selected runtime/);
+  assert.deepEqual(calls,['capture']);
+  assert.equal(fs.existsSync(path.join(c.root,'activation.json')),false);
+});
+test('an existing native service always uses the live idle check',async t=>{
+  const c=desktopHome(t,{pid:4242});
+  await assert.rejects(assertIdle(c,{alive:()=>false,listening:async()=>false}),/No selected runtime/);
+});
 test('rollback cannot replace binaries against a migrated live database',async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'t3-safety-'));
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
