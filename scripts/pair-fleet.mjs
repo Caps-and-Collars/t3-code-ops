@@ -103,7 +103,7 @@ button{background:var(--btn);color:#fff;border:0;border-radius:6px;padding:5px 1
 .qr{margin:8px 0 4px;line-height:0}.qr svg{width:220px;height:220px;background:#fff;border-radius:6px}
 .expired code,.expired button,.expired .qr{display:none}
 </style></head><body><h1>T3 pairing codes</h1>
-<p>Single-use. Enter the primary workspace's own code on its page; add each remote at the primary workspace under + Add environment → Remote link. For the T3 mobile app, scan each QR code from the app's add-connection screen; never scan it with the camera app or open a /pair#token= link in a browser, which spends the code on that page. Delete this file when done.</p>
+<p>Single-use. Enter the primary workspace's own code on its page; add each remote at the primary workspace under + Add environment → Remote link. For the T3 mobile app, scan each QR code from the app's add-connection screen; never scan it with the camera app or open a /pair#token= link in a browser, which spends the code on that page. A later pairing run replaces this page.</p>
 ${rows}
 ${QR_LIB}
 <script>
@@ -113,10 +113,25 @@ const tick=()=>{for(const c of document.querySelectorAll(".card")){const ms=Date
 </script></body></html>
 `;
 }
-function writePairingPage(codes, open) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-pair-"));
+export function writePairingPage(codes, open, tempDir = os.tmpdir()) {
+  const user =
+    typeof process.getuid === "function"
+      ? String(process.getuid())
+      : os.userInfo().username.replace(/[^a-zA-Z0-9_.-]/g, "_") || "user";
+  const dir = path.join(tempDir, `t3-pair-${user}`);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const directory = fs.lstatSync(dir);
+  if (
+    !directory.isDirectory() ||
+    directory.isSymbolicLink() ||
+    (typeof process.getuid === "function" && directory.uid !== process.getuid())
+  ) {
+    throw Error("Pairing page directory is not private to this user.");
+  }
+  if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
   const file = path.join(dir, "pair-codes.html");
   fs.writeFileSync(file, pairingPage(codes), { mode: 0o600 });
+  if (process.platform !== "win32") fs.chmodSync(file, 0o600);
   if (open) {
     const [cmd, args] =
       process.platform === "win32"
@@ -184,7 +199,7 @@ export async function pairMain(argv) {
   console.log(JSON.stringify(results, null, 2));
   if (operation === "codes" && f.page && results.some((r) => r.code)) {
     const file = writePairingPage(results, !f["no-open"]);
-    console.log(`Copy page (delete after use): ${file}`);
+    console.log(`Pairing page (overwritten on the next run): ${file}`);
   }
   if (operation === "codes" && !f.json)
     console.log(

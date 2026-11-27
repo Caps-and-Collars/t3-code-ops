@@ -4,7 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { validateInventory, selectTargets } from "./lib/fleet-inventory.mjs";
-import { pairingArgs, sessionSummary, runPair, pairingPage } from "./pair-fleet.mjs";
+import {
+  pairingArgs,
+  sessionSummary,
+  runPair,
+  pairingPage,
+  writePairingPage,
+} from "./pair-fleet.mjs";
 import { executeSource, shellQuote } from "./lib/fleet-transport.mjs";
 import { atomicJson } from "./lib/ko-release.mjs";
 
@@ -71,6 +77,26 @@ test("pairing page offers host and code copies, escapes values and skips failed 
   assert.ok(!html.includes("down"));
   assert.match(html, /data-qr="https:\/\/pc\.example\.ts\.net\/pair#token=ABC123"/);
   assert.match(html, /integrity="sha384-/);
+});
+test("pairing page overwrites one private file", (t) => {
+  const tempDir = temporary(t);
+  const first = writePairingPage(
+    [{ name: "pc", url: "https://pc.example/", code: "FIRST", expiresAt: "2026-11-18T08:41:00Z" }],
+    false,
+    tempDir,
+  );
+  const second = writePairingPage(
+    [{ name: "pc", url: "https://pc.example/", code: "SECOND", expiresAt: "2026-11-18T08:41:00Z" }],
+    false,
+    tempDir,
+  );
+  assert.equal(second, first);
+  const html = fs.readFileSync(second, "utf8");
+  assert.ok(html.includes("SECOND") && !html.includes("FIRST"));
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(path.dirname(second)).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(second).mode & 0o777, 0o600);
+  }
 });
 test("transport preserves literal paths and Unicode without shell interpolation", async () => {
   const value = "quote ' dollar $() backtick ` umlaut ü";
