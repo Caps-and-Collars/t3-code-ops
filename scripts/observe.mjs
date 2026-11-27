@@ -74,7 +74,9 @@ export function attention(status, now = Date.now()) {
   if (failing) items.push({key:'observer:'+failing.firstAt, message:'The maintenance observer is failing: '+failing.message});
   const p = status.preparation;
   if (lasting(openSince('preparation'), 60)) items.push({key:'preparation-unreachable:'+openSince('preparation'), message:'The T3 preparation report has been unavailable for over an hour: '+status.preparationError});
-  else if (p && lasting(p.checkedAt, 8 * 60)) items.push({key:'preparation-stale:'+p.checkedAt, message:'T3 preparation has not reported for over eight hours. Check the prepare workflow.'});
+  // GitHub delays and drops scheduled runs: the four-hourly schedule reports every 8.6 hours (median) and up to
+  // 12.6 hours apart (October-November 2026), so a shorter threshold announces ordinary schedule jitter.
+  else if (p && lasting(p.checkedAt, 16 * 60)) items.push({key:'preparation-stale:'+p.checkedAt, message:'T3 preparation has not reported for over sixteen hours. Check the prepare workflow.'});
   else if (p?.status === 'failed' || p?.status === 'needs-review')
     items.push({key:`preparation:${p.status}:${p.checkedAt}`, message:`T3 preparation ${p.status === 'failed' ? 'failed' : 'needs review'} for ${p.upstreamTag ?? 'the current upstream release'}.`});
   else if (p?.status === 'ready') {

@@ -117,3 +117,16 @@ function validMigrationReport(report) {
   if(!Array.isArray(report.applied) || !Array.isArray(report.events) || !Array.isArray(report.integrity) || report.integrity.length!==1 || report.integrity[0].integrity_check!=='ok') throw Error('Migration worker did not report a valid integrity result');
   return report;
 }
+// An activation that fails before it selects the candidate (while stopping the old service,
+// taking the stopped-home backup or rehearsing migrations) never ran the candidate against the
+// live home, so the live database is still the one the previous release served. Keep the
+// previous service when it still runs unchanged and serves its own client; otherwise restore it
+// as a database-free rollback would. Only failures after the switch need recovery-required.
+// A failed restore is left to the caller.
+export async function settleBeforeSwitch({active,unchanged,servedHash,expectedHash,restore}) {
+  let kept=false;
+  try {kept=Boolean(expectedHash) && active() && unchanged() && (await servedHash())===expectedHash;} catch {kept=false;}
+  if (kept) return 'kept';
+  await restore();
+  return 'restored';
+}

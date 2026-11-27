@@ -8,7 +8,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 import { atomicJson, digest, readJson, run, verifyInstalled } from "./ko-release.mjs";
 import { nativeManage, nativeStatus, nativeRecovery } from "./ko-deployment-native.mjs";
 import {ensureSupervisor,renderSystemdOverride} from './ko-service-platforms.mjs';
-import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped,requireCompletable,MIGRATION_BOOT_MS} from './ko-safety.mjs';
+import {assertIdle,snapshotStoppedHome,databaseState,liveDatabase,requireSafeBinaryRollback,rehearseMigrations,verifyMigrationSource,assertStopped,requireCompletable,settleBeforeSwitch,MIGRATION_BOOT_MS} from './ko-safety.mjs';
 
 export function loadConfig(path) {
   const config = readJson(path);
@@ -258,6 +258,8 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
   const healthy = dependencies.healthy ?? waitHealthy;
   const recover = dependencies.restore ?? restore;
   const stopped = dependencies.stopped ?? assertStopped;
+  // Set just before the candidate is selected: until then it has never run on the live home.
+  let switched = false;
   NodeFS.mkdirSync(c.root, { recursive: true });
   const lock = NodePath.join(c.root, "activation.lock");
   const fd = NodeFS.openSync(lock, "wx", 0o600);
@@ -349,6 +351,7 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
         atomicJson(journalPath(c),journal);
         await rehearseMigrations(c,target,journal.safety);
       }
+      switched = true;
       setCurrent(c, target);
       ensureSupervisor(c);
       writeOverride(
@@ -364,10 +367,35 @@ export async function manage(c, operation, releaseId, dependencies = {}) {
       );
       atomicJson(journalPath(c), { ...journal, phase: "active", after:databaseState(c.baseDir) });
     } catch (error) {
+      let settleFailure;
+      if (!switched) {
+        let settled;
+        try {
+          settled = await settleBeforeSwitch({
+            active: () => control(c, "is-active") === "active",
+            unchanged: () => linkTarget(c) === previous.link && optionalText(overridePath(c)) === previous.override,
+            servedHash: () => indexHash(c.port),
+            expectedHash: previous.indexHash,
+            restore: async () => {
+              await recover(c, previous);
+              await healthy(c, previous.indexHash);
+            },
+          });
+        } catch (e) {
+          // The previous service could not be kept or restored; recorded and handled below.
+          settleFailure = e.message;
+        }
+        if (settled) {
+          atomicJson(journalPath(c), { ...journal, phase: "rolled-back", failure: error.message, settled });
+          throw new Error(`Activation failed before the release switch; previous service ${settled}: ${error.message}`, {
+            cause: error,
+          });
+        }
+      }
       if (liveDatabase(c.baseDir)) {
         let stopFailure;
         try {control(c,'stop');} catch(e) {stopFailure=e.message;}
-        atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure});
+        atomicJson(journalPath(c),{...journal,phase:'recovery-required',failure:error.message,stopFailure,settleFailure});
         throw new Error('Activation failed; automatic binary rollback disabled. Review the backup and database before agent recovery.',{cause:error});
       }
       try {
